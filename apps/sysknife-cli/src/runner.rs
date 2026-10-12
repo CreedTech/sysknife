@@ -2316,7 +2316,7 @@ where
     let exec_client = DaemonClient::new(opts.socket.clone());
     let start = std::time::Instant::now();
 
-    for step in plan.steps() {
+    for (executed_steps, step) in plan.steps().enumerate() {
         // Preview BEFORE asking. The plan printed above carries planner
         // summaries and risk only; the daemon's preview is what says which
         // package version arrives, which file changes, whether a reboot follows
@@ -2325,7 +2325,24 @@ where
         // been given and execution followed immediately.
         let prepared = exec_client
             .preview_declaring(step.action_name(), step.params(), opts.skip_approval)
-            .await?;
+            .await
+            .map_err(|err| {
+                // Earlier steps have already run. Calling this a planning
+                // failure would hide partial execution from scripts that use
+                // exit 3 to decide whether retrying can repeat a change.
+                if executed_steps == 0 {
+                    err
+                } else {
+                    let reason = match err {
+                        CliError::PlanningFailed(message) => message,
+                        other => other.to_string(),
+                    };
+                    CliError::ExecutionFailed(format!(
+                        "{} preview failed after {executed_steps} executed step(s): {reason}",
+                        step.action_name(),
+                    ))
+                }
+            })?;
         let preview = &prepared.preview;
 
         // The declaration is only worth making if it was recorded. A daemon
@@ -2688,6 +2705,142 @@ mod approval_view_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    mod intent_preview_failure_tests {
+        use super::*;
+        use std::sync::{Arc, Mutex};
+        use sysknife_brain::action_name::ActionName;
+        use sysknife_brain::planner::PlanStep;
+
+        /// Refuse the selected preview while speaking the real framed daemon
+        /// protocol. Successful previews still require approval and execution;
+        /// the recorded requests prove whether a step actually ran.
+        async fn run_with_preview_refusal(
+            refused_preview: usize,
+            step_by_step: bool,
+        ) -> (CliError, Vec<String>) {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let dir = tempfile::tempdir().unwrap();
+            let socket = dir.path().join("daemon.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let events = Arc::new(Mutex::new(Vec::new()));
+            let daemon_events = Arc::clone(&events);
+            let (stop, mut stopped) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(async move {
+                let mut preview_count = 0;
+                loop {
+                    let (mut stream, _) = tokio::select! {
+                        accepted = listener.accept() => accepted.unwrap(),
+                        _ = &mut stopped => break,
+                    };
+                    let len = stream.read_u32_le().await.unwrap() as usize;
+                    let mut body = vec![0; len];
+                    stream.read_exact(&mut body).await.unwrap();
+                    let request: Value = serde_json::from_slice(&body).unwrap();
+                    let kind = request["type"].as_str().unwrap();
+                    daemon_events.lock().unwrap().push(kind.to_owned());
+                    let response = match kind {
+                        "preview" => {
+                            preview_count += 1;
+                            if preview_count == refused_preview {
+                                json!({
+                                    "type": "error_response",
+                                    "message": "mock role denied the preview",
+                                })
+                            } else {
+                                json!({
+                                    "type": "preview_response", "transaction_id": "mock-step",
+                                    "preview": {
+                                        "summary": "mock preview", "risk_level": "low",
+                                        "current_state": {}, "proposed_change": {},
+                                        "expected_side_effects": [], "reboot_required": false,
+                                        "rollback_available": false, "warnings": [],
+                                        "request_hash": "mock-request",
+                                    }
+                                })
+                            }
+                        }
+                        "approve" => json!({
+                            "type": "approval_response", "approval_receipt": "mock-receipt",
+                        }),
+                        "execute" => json!({
+                            "type": "job_completed",
+                            "result": {
+                                "status": "succeeded", "summary": "mock done", "warnings": [],
+                                "job_id": null, "needs_reboot": false, "rollback_ref": null,
+                                "transaction_id": request["transaction_id"],
+                            }
+                        }),
+                        other => panic!("unexpected daemon request {other}"),
+                    };
+                    let bytes = serde_json::to_vec(&response).unwrap();
+                    stream.write_u32_le(bytes.len() as u32).await.unwrap();
+                    stream.write_all(&bytes).await.unwrap();
+                }
+            });
+            let plan = Plan::new(
+                "check disk usage twice".into(),
+                "test plan".into(),
+                "test explanation".into(),
+                (0..2)
+                    .map(|_| {
+                        PlanStep::new(
+                            ActionName::parse("GetDiskUsage").unwrap(),
+                            "check disk usage".into(),
+                            PlanRiskLevel::Low,
+                            json!({}),
+                        )
+                        .unwrap()
+                    })
+                    .collect(),
+            )
+            .unwrap()
+            .into_authorized(authoritative_plan_risk);
+            let opts = RunOpts {
+                socket: SocketTarget::Unix(socket),
+                yes: true,
+                max_risk: None,
+                non_interactive: true,
+                dry_run: false,
+                json: true,
+                step_by_step,
+                skip_approval: false,
+            };
+            let log = Logger::new(None).unwrap();
+            let err = execute_plan(&plan, &opts, &log, |_| async {
+                panic!("low-risk --yes plan must not ask for confirmation");
+            })
+            .await
+            .unwrap_err();
+            stop.send(()).unwrap();
+            task.await.unwrap();
+            let recorded = events.lock().unwrap().clone();
+            (err, recorded)
+        }
+
+        #[tokio::test]
+        async fn preview_refusal_after_execution_exits_2_in_both_modes() {
+            for step_by_step in [false, true] {
+                let (err, requests) = run_with_preview_refusal(2, step_by_step).await;
+                assert_eq!(requests, ["preview", "approve", "execute", "preview"]);
+                assert_eq!(err.exit_code(), 2, "{err}");
+                assert!(matches!(&err, CliError::ExecutionFailed(_)));
+                assert!(err.to_string().contains("mock role denied the preview"));
+            }
+        }
+
+        #[tokio::test]
+        async fn preview_refusal_before_execution_keeps_planning_exit_3_in_both_modes() {
+            for step_by_step in [false, true] {
+                let (err, requests) = run_with_preview_refusal(1, step_by_step).await;
+                assert_eq!(requests, ["preview"]);
+                assert_eq!(err.exit_code(), 3, "{err}");
+                assert!(matches!(&err, CliError::PlanningFailed(_)));
+                assert!(err.to_string().contains("mock role denied the preview"));
+            }
+        }
+    }
 
     #[test]
     fn audit_status_verdict_is_visible_in_text_and_json() {
