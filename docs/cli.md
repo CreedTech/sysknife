@@ -395,7 +395,7 @@ the command:
 | `--max-risk LEVEL` | Abort if the plan or approval transaction exceeds this ceiling. Values: `low`, `medium`, `high`. |
 | `--non-interactive` | Fail immediately (`exit 1`) if any step would require interactive approval.  Use in scripts and CI. |
 | `--dry-run` | Print the plan or approval preview and exit without executing or issuing a receipt. |
-| `--step-by-step` | Prompt for approval before each individual step instead of once for the whole plan.  Each prompt comes *after* that step's daemon preview is printed. |
+| `--step-by-step` | Prompt for approval before each individual step instead of once for the whole plan. Each prompt comes *after* that step's daemon preview is printed. The whole-plan risk ceiling and non-interactive checks still run before any execution preview. |
 | `--json` | Emit NDJSON to stdout — one JSON object per event (plan, preview, result).  All colour and spinner output is suppressed.  Safe to pipe. |
 | `--timeout SECS` | Hard wall-clock limit for the CLI invocation in seconds. Stops waiting when exceeded; see exit codes below. |
 | `--log-to FILE` | Tee stdout to FILE in addition to the terminal. Appends if the file exists; stderr diagnostics are not captured. |
