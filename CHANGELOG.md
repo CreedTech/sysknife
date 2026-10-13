@@ -82,7 +82,7 @@ Releases before `0.2.5` predate the public launch; their notes live in the
   compiles quinn-proto: the crate appears in `Cargo.lock` only. `cargo audit`
   reads the lockfile, so I bumped it to clear the five advisories.
 - **event-listener 5.4.2 (RUSTSEC-2026-0221).**
-  ([#PRNUM](https://github.com/lacs-project/sysknife/pull/PRNUM)) The 5.4.1
+  ([#609](https://github.com/lacs-project/sysknife/pull/609)) The 5.4.1
   `StackSlot` let a `!Send` tag set with `Event::with_tag` cross threads, a data
   race in safe code. Unlike the other accepted `cargo audit` warnings, this one
   reached the daemon and the CLI, through `sqlx-core`. `cargo audit` reports it
@@ -186,7 +186,7 @@ Releases before `0.2.5` predate the public launch; their notes live in the
   [#411](https://github.com/lacs-project/sysknife/issues/411)). Thanks to
   [@yuee3](https://github.com/yuee3).
 - **The docs match the code again.**
-  ([#PRNUM](https://github.com/lacs-project/sysknife/pull/PRNUM)) A review of
+  ([#609](https://github.com/lacs-project/sysknife/pull/609)) A review of
   every maintained page against the source found drift in 30 files. The ones a
   reader would act on:
   - `docs/vm-daemon-setup.md` put the vsock token in the login user's home,
